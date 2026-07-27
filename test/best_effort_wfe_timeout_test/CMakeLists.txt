@@ -1,0 +1,6 @@
+add_executable(best_effort_wfe_timeout_test best_effort_wfe_timeout_test.c)
+
+target_link_libraries(best_effort_wfe_timeout_test PRIVATE pico_stdlib pico_sync)
+pico_add_extra_outputs(best_effort_wfe_timeout_test)
+set_target_properties(best_effort_wfe_timeout_test PROPERTIES PICO_TEST_TIMEOUT 10)
+set_target_properties(best_effort_wfe_timeout_test PROPERTIES PICO_TEST_SUCCESS_STRING "TEST PASSED")
