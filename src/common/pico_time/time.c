@@ -509,7 +509,12 @@ bool best_effort_wfe_or_timeout(absolute_time_t timeout_timestamp) {
             // we already are waking up at or before when we want to (possibly due to us having been called
             // before in a loop), so we can do an actual WFE. Note we rely on the fact that the alarm pool IRQ
             // handler always does an explicit SEV, since it may be on the other core.
-            __wfe();
+            //
+            // The alarm relied on here is one-shot: if the deadline has already passed it has already
+            // fired and nothing is armed, so there is no wake-up to wait for.
+            if (!time_reached(timeout_timestamp)) {
+                __wfe();
+            }
             return time_reached(timeout_timestamp);
         } else {
             id = add_alarm_at(timeout_timestamp, sleep_until_callback, NULL, false);
