@@ -84,8 +84,15 @@
 #define HTTPC_DEBUG_WARN_STATE   (HTTPC_DEBUG | LWIP_DBG_LEVEL_WARNING | LWIP_DBG_STATE)
 #define HTTPC_DEBUG_SERIOUS      (HTTPC_DEBUG | LWIP_DBG_LEVEL_SERIOUS)
 
+#ifndef HTTPC_POLL_INTERVAL
 #define HTTPC_POLL_INTERVAL     1
+#endif
+
+/** HTTPC_POLL_TIMEOUT: idle ticks (of HTTPC_POLL_INTERVAL, i.e. units of
+ * 500ms) before an idle request is aborted with HTTPC_RESULT_ERR_TIMEOUT. */
+#ifndef HTTPC_POLL_TIMEOUT
 #define HTTPC_POLL_TIMEOUT      30 /* 15 seconds */
+#endif
 
 #define HTTPC_CONTENT_LEN_INVALID 0xFFFFFFFF
 
