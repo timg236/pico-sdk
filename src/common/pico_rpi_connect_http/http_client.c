@@ -164,6 +164,7 @@ typedef struct _httpc_state
   u32_t rx_content_len;
   u32_t hdr_content_len;
   httpc_parse_state_t parse_state;
+  u8_t result_callback_done;
 #if HTTPC_DEBUG_REQUEST
   char* server_name;
   char* uri;
@@ -205,14 +206,25 @@ httpc_free_state(httpc_state_t* req)
   return ERR_OK;
 }
 
+/** Abort an in-progress connection without invoking the result callback.
+ *  Must be called with the lwIP/async lock held. */
+void httpc_abort(httpc_state_t *req)
+{
+  if (req != NULL) {
+    req->result_callback_done = 1;
+    httpc_free_state(req);
+  }
+}
+
 /** Close the connection: call finished callback and free the state */
 static err_t
 httpc_close(httpc_state_t* req, httpc_result_t result, u32_t server_response, err_t err)
 {
   if (req != NULL) {
     if (req->conn_settings != NULL) {
-      if (req->conn_settings->result_fn != NULL) {
+      if (req->conn_settings->result_fn != NULL && !req->result_callback_done) {
         req->conn_settings->result_fn(req->callback_arg, result, req->rx_content_len, server_response, err);
+        req->result_callback_done = 1;
       }
     }
     return httpc_free_state(req);
