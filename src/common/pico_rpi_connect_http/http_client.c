@@ -248,14 +248,14 @@ http_parse_response_status(struct pbuf *p, u16_t *http_version, u16_t *http_stat
 
 /** Wait for all headers to be received, return its length and content-length (if available) */
 static err_t
-http_wait_headers(struct pbuf *p, u32_t *content_length, u16_t *total_header_len)
+http_wait_headers(struct pbuf *p, u32_t *content_length, u16_t *total_header_len, u16_t status)
 {
   u16_t end1 = pbuf_memfind(p, "\r\n\r\n", 4, 0);
   if (end1 < (0xFFFF - 2)) {
     /* all headers received */
     /* check if we have a content length (@todo: case insensitive?) */
     u16_t content_len_hdr;
-    *content_length = HTTPC_CONTENT_LEN_INVALID;
+    *content_length = status == 204 ? 0 : HTTPC_CONTENT_LEN_INVALID;
     *total_header_len = end1 + 4;
 
     content_len_hdr = pbuf_memfind(p, "Content-Length: ", 16, 0);
@@ -319,7 +319,7 @@ httpc_tcp_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t r)
     }
     if (req->parse_state == HTTPC_PARSE_WAIT_HEADERS) {
       u16_t total_header_len;
-      err_t err = http_wait_headers(req->rx_hdrs, &req->hdr_content_len, &total_header_len);
+      err_t err = http_wait_headers(req->rx_hdrs, &req->hdr_content_len, &total_header_len, req->rx_status);
       if (err == ERR_OK) {
         struct pbuf *q;
         /* full header received, send window update for header bytes and call into client callback */
