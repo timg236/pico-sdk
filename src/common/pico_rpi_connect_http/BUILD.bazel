@@ -1,0 +1,21 @@
+load("//bazel:defs.bzl", "compatible_with_rp2")
+
+package(default_visibility = ["//visibility:public"])
+
+# pico_rpi_connect_http holds downstream patches to the lwIP HTTP client
+# (http_client.c / http_client.h). It is kept as a standalone library so the
+# changes can eventually be upstreamed to lwIP and this library removed.
+cc_library(
+    name = "pico_rpi_connect_http",
+    srcs = ["http_client.c"],
+    hdrs = ["http_client.h"],
+    # The header is included as "http_client.h" by pico_rpi_connect, so expose
+    # the package directory on the include path for dependents.
+    includes = ["."],
+    target_compatible_with = compatible_with_rp2(),
+    deps = [
+        "//src/rp2_common/pico_lwip",
+        "//src/rp2_common/pico_mbedtls",
+        "//src/rp2_common/pico_stdlib",
+    ],
+)
