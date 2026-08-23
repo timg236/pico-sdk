@@ -346,16 +346,29 @@ httpc_tcp_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t r)
       }
     }
   }
-  if ((p != NULL) && (req->parse_state == HTTPC_PARSE_RX_DATA)) {
-    req->rx_content_len += p->tot_len;
-    /* received valid data: reset timeout */
-    req->timeout_ticks = HTTPC_POLL_TIMEOUT;
-    if (req->recv_fn != NULL) {
-      /* directly return here: the connection might already be aborted from the callback! */
-      return req->recv_fn(req->callback_arg, pcb, p, r);
-    } else {
-      altcp_recved(pcb, p->tot_len);
-      pbuf_free(p);
+  if ((req->parse_state == HTTPC_PARSE_RX_DATA)) {
+    if (p != NULL) {
+      req->rx_content_len += p->tot_len;
+      /* received valid data: reset timeout */
+      req->timeout_ticks = HTTPC_POLL_TIMEOUT;
+      if (req->recv_fn != NULL) {
+        /* directly return here: the connection might already be aborted from the callback! */
+        err_t err = req->recv_fn(req->callback_arg, pcb, p, r);
+        if (err != ERR_OK)
+          return err;
+      } else {
+        altcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+      }
+    }
+    /* else: no body data in this segment; fall through to the completion check below */
+    if (req->rx_content_len >= req->hdr_content_len) {
+      httpc_result_t result;
+      if (req->hdr_content_len != req->rx_content_len)
+        result = HTTPC_RESULT_ERR_CONTENT_LEN;
+      else
+        result = HTTPC_RESULT_OK;
+      return httpc_close(req, result, req->rx_status, ERR_OK);
     }
   }
   return ERR_OK;
