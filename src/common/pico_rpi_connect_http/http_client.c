@@ -108,6 +108,20 @@
     "\r\n"
 #define HTTPC_REQ_11_HOST_FORMAT(uri, srv_name, extra_headers) HTTPC_REQ_11_HOST, uri, HTTPC_CLIENT_AGENT, srv_name, extra_headers
 
+/* POST request - header-only format.  The body is appended separately
+ * via memcpy in httpc_create_post_string() because printf's "%.*s"
+ * conversion still stops at a NUL byte even when a precision is
+ * specified (C11 7.21.6.1 p.8), which would truncate any binary body
+ * (e.g. msgpack) that contains 0x00. */
+#define HTTPC_REQ_11_POST_HDR "POST %s HTTP/1.1\r\n" /* URI */\
+    "User-Agent: %s\r\n" \
+    "Host: %s\r\n" \
+    "Connection: Close\r\n" /* we don't support persistent connections, yet */ \
+    "%s" /* extra headers */\
+    "content-length: %d\r\n" /* data length */\
+    "\r\n"
+#define HTTPC_REQ_11_POST_HDR_FORMAT(uri, srv_name, extra_headers, length) HTTPC_REQ_11_POST_HDR, uri, HTTPC_CLIENT_AGENT, srv_name, extra_headers, length
+
 /* GET request with proxy */
 #define HTTPC_REQ_11_PROXY "GET http://%s%s HTTP/1.1\r\n" /* HOST, URI */\
     "User-Agent: %s\r\n" /* User-Agent */ \
@@ -535,27 +549,50 @@ httpc_create_request_string(const httpc_connection_t *settings, const char* serv
   }
 }
 
+static int httpc_create_post_string(const httpc_connection_t *settings, const char* server_name, const char* uri, u16_t data_len, const char *data, char *buffer, size_t buffer_size)
+{
+  LWIP_ASSERT("use_proxy is true", !(settings && settings->use_proxy));
+  const char *extra_headers = "";
+  if (settings && settings->extra_headers_fn)
+    extra_headers = settings->extra_headers_fn(settings->extra_headers_arg);
+
+  /* Write the HTTP headers first.  snprintf(NULL, 0, ...) is used as a
+   * length probe on the first pass (buffer == NULL), so treat the body
+   * identically for the probe and the real write. */
+  int hdr_len = snprintf(buffer, buffer_size,
+                         HTTPC_REQ_11_POST_HDR_FORMAT(uri, server_name, extra_headers, data_len));
+  if (hdr_len < 0) return hdr_len;
+
+  /* Append body via memcpy - must NOT go through printf's %s because a
+   * NUL byte inside the body (common in msgpack / octet-stream payloads)
+   * would truncate the output. */
+  if (buffer) {
+    if ((size_t)hdr_len < buffer_size) {
+      size_t room = buffer_size - hdr_len;
+      size_t to_copy = data_len < room ? data_len : room;
+      if (data && to_copy) memcpy(buffer + hdr_len, data, to_copy);
+    }
+  }
+  return hdr_len + data_len;
+}
+
 /** Initialize the connection struct */
 static err_t
 httpc_init_connection_common(httpc_state_t **connection, const httpc_connection_t *settings, const char* server_name,
-                      u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg, int use_host)
+                      u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg, int req_len)
 {
   size_t alloc_len;
   mem_size_t mem_alloc_len;
-  int req_len, req_len2;
   httpc_state_t *req;
 #if HTTPC_DEBUG_REQUEST
   size_t server_name_len, uri_len;
+#else
+  LWIP_UNUSED_ARG(server_name);
+  LWIP_UNUSED_ARG(uri);
 #endif
 
   LWIP_ERROR("httpc connection settings not give", settings != NULL, return ERR_ARG;);
-  LWIP_ASSERT("uri != NULL", uri != NULL);
 
-  /* get request len */
-  req_len = httpc_create_request_string(settings, server_name, server_port, uri, use_host, NULL, 0);
-  if ((req_len < 0) || (req_len > 0xFFFF)) {
-    return ERR_VAL;
-  }
   /* alloc state and request in one block */
   alloc_len = sizeof(httpc_state_t);
 #if HTTPC_DEBUG_REQUEST
@@ -605,19 +642,58 @@ httpc_init_connection_common(httpc_state_t **connection, const httpc_connection_
   altcp_poll(req->pcb, httpc_tcp_poll, HTTPC_POLL_INTERVAL);
   altcp_sent(req->pcb, httpc_tcp_sent);
 
-  /* set up request buffer */
-  req_len2 = httpc_create_request_string(settings, server_name, server_port, uri, use_host,
-    (char *)req->request->payload, req_len + 1);
-  if (req_len2 != req_len) {
-    httpc_free_state(req);
-    return ERR_VAL;
-  }
-
   req->recv_fn = recv_fn;
   req->conn_settings = settings;
   req->callback_arg = callback_arg;
 
   *connection = req;
+  return ERR_OK;
+}
+
+static err_t
+httpc_init_connection_common_get(httpc_state_t **connection, const httpc_connection_t *settings, const char* server_name,
+                      u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg, int use_host)
+{
+  LWIP_ASSERT("uri != NULL", uri != NULL);
+
+  /* get request len */
+  int req_len = httpc_create_request_string(settings, server_name, server_port, uri, use_host, NULL, 0);
+  if ((req_len < 0) || (req_len > 0xFFFF)) {
+    return ERR_VAL;
+  }
+  int err = httpc_init_connection_common(connection, settings, server_name, server_port, uri, recv_fn, callback_arg, req_len);
+  if (err != ERR_OK) {
+    return err;
+  }
+  int req_len2 = httpc_create_request_string(settings, server_name, server_port, uri, use_host,
+    (char *)(*connection)->request->payload, req_len + 1);
+  if (req_len2 != req_len) {
+    httpc_free_state(*connection);
+    return ERR_VAL;
+  }
+  return ERR_OK;
+}
+
+static err_t
+httpc_init_connection_common_post(httpc_state_t **connection, const httpc_connection_t *settings, const char* server_name,
+                      u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg, u16_t data_len, const char *data)
+{
+  LWIP_ASSERT("uri != NULL", uri != NULL);
+
+  /* get request len */
+  int req_len = httpc_create_post_string(settings, server_name, uri, data_len, data, NULL, 0);
+  if ((req_len < 0) || (req_len > 0xFFFF)) {
+    return ERR_VAL;
+  }
+  int err = httpc_init_connection_common(connection, settings, server_name, server_port, uri, recv_fn, callback_arg, req_len);
+  if (err != ERR_OK) {
+    return err;
+  }
+  int req_len2 = httpc_create_post_string(settings, server_name, uri, data_len, data, (char *)(*connection)->request->payload, req_len + 1);
+  if (req_len2 != req_len) {
+    httpc_free_state(*connection);
+    return ERR_VAL;
+  }
   return ERR_OK;
 }
 
@@ -628,7 +704,7 @@ static err_t
 httpc_init_connection(httpc_state_t **connection, const httpc_connection_t *settings, const char* server_name,
                       u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg)
 {
-  return httpc_init_connection_common(connection, settings, server_name, server_port, uri, recv_fn, callback_arg, 1);
+  return httpc_init_connection_common_get(connection, settings, server_name, server_port, uri, recv_fn, callback_arg, 1);
 }
 
 
@@ -644,7 +720,7 @@ httpc_init_connection_addr(httpc_state_t **connection, const httpc_connection_t 
   if (server_addr_str == NULL) {
     return ERR_VAL;
   }
-  return httpc_init_connection_common(connection, settings, server_addr_str, server_port, uri,
+  return httpc_init_connection_common_get(connection, settings, server_addr_str, server_port, uri,
     recv_fn, callback_arg, 1);
 }
 
@@ -717,6 +793,36 @@ httpc_get_file_dns(const char* server_name, u16_t port, const char* uri, const h
   LWIP_ERROR("invalid parameters", (server_name != NULL) && (uri != NULL) && (recv_fn != NULL), return ERR_ARG;);
 
   err = httpc_init_connection(&req, settings, server_name, port, uri, recv_fn, callback_arg);
+  if (err != ERR_OK) {
+    return err;
+  }
+
+  if (settings && settings->use_proxy) {
+    err = httpc_get_internal_addr(req, &settings->proxy_addr);
+  } else {
+    err = httpc_get_internal_dns(req, server_name);
+  }
+  if (err != ERR_OK) {
+    httpc_free_state(req);
+    return err;
+  }
+
+  if (connection != NULL) {
+    *connection = req;
+  }
+  return ERR_OK;
+}
+
+err_t
+httpc_post_file_dns(const char* server_name, u16_t port, const char* uri, const httpc_connection_t *settings,
+                   altcp_recv_fn recv_fn, void* callback_arg, u16_t data_len, const char *data, httpc_state_t **connection)
+{
+  err_t err;
+  httpc_state_t* req;
+
+  LWIP_ERROR("invalid parameters", (server_name != NULL) && (uri != NULL) && (recv_fn != NULL), return ERR_ARG;);
+
+  err = httpc_init_connection_common_post(&req, settings, server_name, port, uri, recv_fn, callback_arg, data_len, data);
   if (err != ERR_OK) {
     return err;
   }

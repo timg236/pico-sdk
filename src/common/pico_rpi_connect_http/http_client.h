@@ -151,6 +151,9 @@ err_t httpc_get_file(const ip_addr_t* server_addr, u16_t port, const char* uri, 
 err_t httpc_get_file_dns(const char* server_name, u16_t port, const char* uri, const httpc_connection_t *settings,
                      altcp_recv_fn recv_fn, void* callback_arg, httpc_state_t **connection);
 
+err_t httpc_post_file_dns(const char* server_name, u16_t port, const char* uri, const httpc_connection_t *settings,
+                     altcp_recv_fn recv_fn, void* callback_arg, u16_t data_len, const char *data, httpc_state_t **connection);
+
 #if LWIP_HTTPC_HAVE_FILE_IO
 err_t httpc_get_file_to_disk(const ip_addr_t* server_addr, u16_t port, const char* uri, const httpc_connection_t *settings,
                      void* callback_arg, const char* local_file_name, httpc_state_t **connection);
