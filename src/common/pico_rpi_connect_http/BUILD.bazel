@@ -12,6 +12,9 @@ cc_library(
     # The header is included as "http_client.h" by pico_rpi_connect, so expose
     # the package directory on the include path for dependents.
     includes = ["."],
+    # Pi Connect holds requests open for a long time (SSE event stream, large
+    # OTA downloads on slow links)
+    local_defines = ["HTTPC_POLL_TIMEOUT=240"],
     target_compatible_with = compatible_with_rp2(),
     deps = [
         "//src/rp2_common/pico_lwip",

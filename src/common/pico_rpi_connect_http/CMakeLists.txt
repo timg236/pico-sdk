@@ -4,6 +4,9 @@
 if (NOT TARGET pico_rpi_connect_http)
     add_library(pico_rpi_connect_http INTERFACE)
     target_include_directories(pico_rpi_connect_http INTERFACE ${CMAKE_CURRENT_LIST_DIR})
+    # Pi Connect holds requests open for a long time (SSE event stream, large
+    # OTA downloads on slow links)
+    target_compile_definitions(pico_rpi_connect_http INTERFACE HTTPC_POLL_TIMEOUT=240)
     target_sources(pico_rpi_connect_http INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/http_client.c
     )
