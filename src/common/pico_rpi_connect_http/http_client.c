@@ -259,6 +259,11 @@ http_wait_headers(struct pbuf *p, u32_t *content_length, u16_t *total_header_len
     *total_header_len = end1 + 4;
 
     content_len_hdr = pbuf_memfind(p, "Content-Length: ", 16, 0);
+    if (content_len_hdr == 0xFFFF) {
+      /* field names are case-insensitive (RFC 9110 5.1); HTTP/2-style
+         gateways commonly forward them all-lowercase */
+      content_len_hdr = pbuf_memfind(p, "content-length: ", 16, 0);
+    }
     if (content_len_hdr != 0xFFFF) {
       u16_t content_len_line_end = pbuf_memfind(p, "\r\n", 2, content_len_hdr);
       if (content_len_line_end != 0xFFFF) {
