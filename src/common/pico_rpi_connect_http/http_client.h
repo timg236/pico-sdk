@@ -122,6 +122,9 @@ typedef void (*httpc_result_fn)(void *arg, httpc_result_t httpc_result, u32_t rx
  */
 typedef err_t (*httpc_headers_done_fn)(httpc_state_t *connection, void *arg, struct pbuf *hdr, u16_t hdr_len, u32_t content_len);
 
+// Add headers to the request
+typedef const char* (*httpc_extra_headers_fn)(void *arg);
+
 typedef struct _httpc_connection {
   ip_addr_t proxy_addr;
   u16_t proxy_port;
@@ -137,6 +140,10 @@ typedef struct _httpc_connection {
   /* this callback is called after receiving the http headers
      It can abort the connection by returning != ERR_OK */
   httpc_headers_done_fn headers_done_fn;
+
+  // Optional function to get extra headers for the request
+  httpc_extra_headers_fn extra_headers_fn;
+  void *extra_headers_arg;
 } httpc_connection_t;
 
 err_t httpc_get_file(const ip_addr_t* server_addr, u16_t port, const char* uri, const httpc_connection_t *settings,

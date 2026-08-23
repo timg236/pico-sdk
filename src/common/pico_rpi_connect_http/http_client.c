@@ -94,8 +94,9 @@
     "User-Agent: %s\r\n" /* User-Agent */ \
     "Accept: */*\r\n" \
     "Connection: Close\r\n" /* we don't support persistent connections, yet */ \
+    "%s" /* extra headers */\
     "\r\n"
-#define HTTPC_REQ_11_FORMAT(uri) HTTPC_REQ_11, uri, HTTPC_CLIENT_AGENT
+#define HTTPC_REQ_11_FORMAT(uri, extra_headers) HTTPC_REQ_11, uri, HTTPC_CLIENT_AGENT, extra_headers
 
 /* GET request with host */
 #define HTTPC_REQ_11_HOST "GET %s HTTP/1.1\r\n" /* URI */\
@@ -103,8 +104,9 @@
     "Accept: */*\r\n" \
     "Host: %s\r\n" /* server name */ \
     "Connection: Close\r\n" /* we don't support persistent connections, yet */ \
+    "%s" /* extra headers */\
     "\r\n"
-#define HTTPC_REQ_11_HOST_FORMAT(uri, srv_name) HTTPC_REQ_11_HOST, uri, HTTPC_CLIENT_AGENT, srv_name
+#define HTTPC_REQ_11_HOST_FORMAT(uri, srv_name, extra_headers) HTTPC_REQ_11_HOST, uri, HTTPC_CLIENT_AGENT, srv_name, extra_headers
 
 /* GET request with proxy */
 #define HTTPC_REQ_11_PROXY "GET http://%s%s HTTP/1.1\r\n" /* HOST, URI */\
@@ -112,8 +114,9 @@
     "Accept: */*\r\n" \
     "Host: %s\r\n" /* server name */ \
     "Connection: Close\r\n" /* we don't support persistent connections, yet */ \
+    "%s" \
     "\r\n"
-#define HTTPC_REQ_11_PROXY_FORMAT(host, uri, srv_name) HTTPC_REQ_11_PROXY, host, uri, HTTPC_CLIENT_AGENT, srv_name
+#define HTTPC_REQ_11_PROXY_FORMAT(host, uri, srv_name, extra_headers) HTTPC_REQ_11_PROXY, host, uri, HTTPC_CLIENT_AGENT, srv_name, extra_headers
 
 /* GET request with proxy (non-default server port) */
 #define HTTPC_REQ_11_PROXY_PORT "GET http://%s:%d%s HTTP/1.1\r\n" /* HOST, host-port, URI */\
@@ -121,8 +124,9 @@
     "Accept: */*\r\n" \
     "Host: %s\r\n" /* server name */ \
     "Connection: Close\r\n" /* we don't support persistent connections, yet */ \
+    "%s" \
     "\r\n"
-#define HTTPC_REQ_11_PROXY_PORT_FORMAT(host, host_port, uri, srv_name) HTTPC_REQ_11_PROXY_PORT, host, host_port, uri, HTTPC_CLIENT_AGENT, srv_name
+#define HTTPC_REQ_11_PROXY_PORT_FORMAT(host, host_port, uri, srv_name, extra_headers) HTTPC_REQ_11_PROXY_PORT, host, host_port, uri, HTTPC_CLIENT_AGENT, srv_name, extra_headers
 
 typedef enum ehttpc_parse_state {
   HTTPC_PARSE_WAIT_FIRST_LINE = 0,
@@ -513,18 +517,21 @@ static int
 httpc_create_request_string(const httpc_connection_t *settings, const char* server_name, int server_port, const char* uri,
                             int use_host, char *buffer, size_t buffer_size)
 {
+  const char *extra_headers = "";
+  if (settings && settings->extra_headers_fn)
+    extra_headers = settings->extra_headers_fn(settings->extra_headers_arg);
   if (settings && settings->use_proxy) {
     LWIP_ASSERT("server_name != NULL", server_name != NULL);
     if (server_port != HTTP_DEFAULT_PORT) {
-      return snprintf(buffer, buffer_size, HTTPC_REQ_11_PROXY_PORT_FORMAT(server_name, server_port, uri, server_name));
+      return snprintf(buffer, buffer_size, HTTPC_REQ_11_PROXY_PORT_FORMAT(server_name, server_port, uri, server_name, extra_headers));
     } else {
-      return snprintf(buffer, buffer_size, HTTPC_REQ_11_PROXY_FORMAT(server_name, uri, server_name));
+      return snprintf(buffer, buffer_size, HTTPC_REQ_11_PROXY_FORMAT(server_name, uri, server_name, extra_headers));
     }
   } else if (use_host) {
     LWIP_ASSERT("server_name != NULL", server_name != NULL);
-    return snprintf(buffer, buffer_size, HTTPC_REQ_11_HOST_FORMAT(uri, server_name));
+    return snprintf(buffer, buffer_size, HTTPC_REQ_11_HOST_FORMAT(uri, server_name, extra_headers));
   } else {
-    return snprintf(buffer, buffer_size, HTTPC_REQ_11_FORMAT(uri));
+    return snprintf(buffer, buffer_size, HTTPC_REQ_11_FORMAT(uri, extra_headers));
   }
 }
 
