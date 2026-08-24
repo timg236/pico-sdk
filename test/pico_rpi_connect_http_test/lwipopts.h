@@ -1,8 +1,8 @@
 #ifndef _LWIPOPTS_H
 #define _LWIPOPTS_H
 
-// lwIP options for the pico_rpi_connect_http test: plain HTTP over TCP with
-// the threadsafe-background async context, no TLS/altcp.
+// lwIP options for the pico_rpi_connect_http test: HTTP over TCP and HTTPS
+// over altcp_tls/mbedtls with the threadsafe-background async context.
 
 #define NO_SYS                      1
 #define LWIP_SOCKET                 0
@@ -16,7 +16,10 @@
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
-#define TCP_WND                     (8 * TCP_MSS)
+/* TCP_WND must be strictly greater than the maximum raw TLS record size
+   (~16413 bytes for a 16384-byte plaintext record) or the window fills
+   before mbedTLS can complete the record and the connection deadlocks. */
+#define TCP_WND                     32768
 #define TCP_MSS                     1460
 #define TCP_SND_BUF                 (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
@@ -38,5 +41,12 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
+
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
+/* lwIP's default is MBEDTLS_SSL_VERIFY_OPTIONAL, which completes the
+   handshake even when the server certificate fails verification. */
+#define ALTCP_MBEDTLS_AUTHMODE      MBEDTLS_SSL_VERIFY_REQUIRED
 
 #endif

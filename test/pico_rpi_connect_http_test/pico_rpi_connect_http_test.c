@@ -22,7 +22,11 @@
 #include "pico/sem.h"
 #include "pico/test.h"
 
+#include "lwip/altcp_tls.h"
+#include "mbedtls/ssl.h"
+
 #include "http_client.h"
+#include "test_ca_cert.h"
 
 PICOTEST_MODULE_NAME("http", "pico_rpi_connect_http test");
 
@@ -37,6 +41,13 @@ PICOTEST_MODULE_NAME("http", "pico_rpi_connect_http test");
 #endif
 #ifndef HTTP_TEST_PORT
 #define HTTP_TEST_PORT 8080
+#endif
+#ifndef HTTP_TEST_TLS_PORT
+#define HTTP_TEST_TLS_PORT 8443
+#endif
+// Serves a certificate not signed by the built-in CA.
+#ifndef HTTP_TEST_UNTRUSTED_TLS_PORT
+#define HTTP_TEST_UNTRUSTED_TLS_PORT 8444
 #endif
 // Nothing listens here: connections should be refused.
 #ifndef HTTP_TEST_CLOSED_PORT
@@ -55,6 +66,7 @@ PICOTEST_MODULE_NAME("http", "pico_rpi_connect_http test");
 
 typedef struct {
     httpc_connection_t settings;
+    altcp_allocator_t tls_allocator;
     httpc_state_t *state;
     semaphore_t done_sem;
     volatile bool done;
@@ -108,12 +120,22 @@ static const char *test_extra_headers_fn(void *arg) {
     return (const char *)arg;
 }
 
+// Set the TLS hostname so mbedtls verifies the server certificate's name,
+// not just the chain to the built-in CA.
+static struct altcp_pcb *test_tls_alloc_fn(void *arg, u8_t ip_type) {
+    struct altcp_pcb *pcb = altcp_tls_alloc((struct altcp_tls_config *)arg, ip_type);
+    if (pcb) {
+        mbedtls_ssl_set_hostname(altcp_tls_context(pcb), HTTP_TEST_SERVER);
+    }
+    return pcb;
+}
+
 // Run one request to completion. Returns 0 when the transfer completed
 // (successfully or with an error result - check req->result and req->status),
 // -1 if the request could not be started or timed out.
 static int http_test_request(http_test_req_t *req, const char *host, uint16_t port,
                              const char *uri, const char *post_data, uint16_t post_len,
-                             const char *extra_headers) {
+                             const char *extra_headers, struct altcp_tls_config *tls) {
     memset(req, 0, sizeof(*req));
     sem_init(&req->done_sem, 0, 1);
     req->settings.result_fn = test_result_fn;
@@ -121,6 +143,11 @@ static int http_test_request(http_test_req_t *req, const char *host, uint16_t po
     if (extra_headers) {
         req->settings.extra_headers_fn = test_extra_headers_fn;
         req->settings.extra_headers_arg = (void *)extra_headers;
+    }
+    if (tls) {
+        req->tls_allocator.alloc = test_tls_alloc_fn;
+        req->tls_allocator.arg = tls;
+        req->settings.altcp_allocator = &req->tls_allocator;
     }
     req->hdr_content_len = HTTP_TEST_CONTENT_LEN_UNKNOWN;
 
@@ -157,11 +184,11 @@ static int http_test_request(http_test_req_t *req, const char *host, uint16_t po
 }
 
 static int http_test_get(http_test_req_t *req, const char *uri) {
-    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, NULL, 0, NULL);
+    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, NULL, 0, NULL, NULL);
 }
 
 static int http_test_post(http_test_req_t *req, const char *uri, const char *data, uint16_t len) {
-    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, data, len, NULL);
+    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, data, len, NULL, NULL);
 }
 
 // Request bodies used by the POST and soak sections.
@@ -231,7 +258,7 @@ int main(void) {
 
     PICOTEST_START_SECTION("Request headers");
     rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_PORT, "/headers",
-                           NULL, 0, "X-Test-Id: 42\r\n");
+                           NULL, 0, "X-Test-Id: 42\r\n", NULL);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /headers did not complete");
     PICOTEST_CHECK(req.status == 200, "GET /headers status is not 200");
     PICOTEST_CHECK(strstr(req.body, "X-Test-Id: 42") != NULL,
@@ -275,13 +302,46 @@ int main(void) {
 
     PICOTEST_START_SECTION("Transport errors");
     rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_CLOSED_PORT, "/get",
-                           NULL, 0, NULL);
+                           NULL, 0, NULL, NULL);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "Closed-port request did not complete");
     PICOTEST_CHECK(req.result != HTTPC_RESULT_OK, "Closed-port request did not fail");
     rc = http_test_request(&req, "no-such-host.invalid", HTTP_TEST_PORT, "/get",
-                           NULL, 0, NULL);
+                           NULL, 0, NULL, NULL);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "Bad-hostname request did not complete");
     PICOTEST_CHECK(req.result == HTTPC_RESULT_ERR_HOSTNAME, "Bad hostname did not fail DNS");
+    PICOTEST_END_SECTION();
+
+    // HTTPS: the server certificate must chain to the built-in CA and carry
+    // the server's name.
+    struct altcp_tls_config *tls_config =
+        altcp_tls_create_config_client((const u8_t *)test_ca_cert, sizeof(test_ca_cert));
+    PICOTEST_CHECK_AND_ABORT(tls_config != NULL, "Failed to create TLS client config");
+
+    PICOTEST_START_SECTION("HTTPS GET");
+    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_TLS_PORT, "/get",
+                           NULL, 0, NULL, tls_config);
+    PICOTEST_CHECK_AND_ABORT(rc == 0, "HTTPS GET /get did not complete");
+    PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "HTTPS GET /get transfer failed");
+    PICOTEST_CHECK(req.status == 200, "HTTPS GET /get status is not 200");
+    PICOTEST_CHECK(strcmp(req.body, "pico-http-test-get\n") == 0, "HTTPS GET /get body mismatch");
+    PICOTEST_END_SECTION();
+
+    PICOTEST_START_SECTION("HTTPS POST");
+    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_TLS_PORT, "/echo",
+                           post_body, sizeof(post_body) - 1, NULL, tls_config);
+    PICOTEST_CHECK_AND_ABORT(rc == 0, "HTTPS POST /echo did not complete");
+    PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "HTTPS POST /echo transfer failed");
+    PICOTEST_CHECK(strcmp(req.body, post_body) == 0, "HTTPS POST /echo body was not echoed");
+    PICOTEST_END_SECTION();
+
+    // A server certificate not signed by the built-in CA must be rejected
+    // during the handshake.
+    PICOTEST_START_SECTION("HTTPS untrusted certificate");
+    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_UNTRUSTED_TLS_PORT, "/get",
+                           NULL, 0, NULL, tls_config);
+    PICOTEST_CHECK_AND_ABORT(rc == 0, "Untrusted-certificate request did not complete");
+    PICOTEST_CHECK(req.result != HTTPC_RESULT_OK, "Untrusted certificate was not rejected");
+    PICOTEST_CHECK(req.status != 200, "Untrusted certificate served a response");
     PICOTEST_END_SECTION();
 
     PICOTEST_START_SECTION("Soak");

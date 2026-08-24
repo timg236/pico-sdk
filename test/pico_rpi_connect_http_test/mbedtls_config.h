@@ -62,3 +62,7 @@
 #define MBEDTLS_ASN1_WRITE_C
 
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
+
+/* PEM parsing for the built-in test CA certificate */
+#define MBEDTLS_PEM_PARSE_C
+#define MBEDTLS_BASE64_C

@@ -12,10 +12,14 @@
 #                     client parsing the header case-insensitively
 
 import argparse
+import os
+import ssl
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_DATA_LEN = 1024 * 1024
+CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
 
 
 class TestHandler(BaseHTTPRequestHandler):
@@ -77,14 +81,36 @@ class TestHandler(BaseHTTPRequestHandler):
             self.send_body(b"not found\n", status=404)
 
 
+def tls_server(bind, port, cert):
+    # A missing certificate (gen_test_certs.sh not run) skips the listener:
+    # the plain-HTTP tests can still run.
+    certfile = os.path.join(CERT_DIR, f"{cert}.crt")
+    keyfile = os.path.join(CERT_DIR, f"{cert}.key")
+    if not (os.path.exists(certfile) and os.path.exists(keyfile)):
+        print(f"No {cert} certificate (run gen_test_certs.sh); not serving on {port}")
+        return None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile, keyfile)
+    server = ThreadingHTTPServer((bind, port), TestHandler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"Serving TLS ({cert}) on {bind}:{port}")
+    return server
+
+
 def main():
     parser = argparse.ArgumentParser(description="HTTP test server for pico_rpi_connect_http_test")
     parser.add_argument("-p", "--port", type=int, default=8080)
+    parser.add_argument("--tls-port", type=int, default=8443)
+    parser.add_argument("--untrusted-port", type=int, default=8444,
+                        help="TLS port serving a certificate not signed by the test CA")
     parser.add_argument("-b", "--bind", default="0.0.0.0")
     parser.add_argument("-q", "--quiet", action="store_true", help="suppress request logging")
     args = parser.parse_args()
 
     TestHandler.quiet = args.quiet
+    tls_server(args.bind, args.tls_port, "server")
+    tls_server(args.bind, args.untrusted_port, "untrusted")
     server = ThreadingHTTPServer((args.bind, args.port), TestHandler)
     print(f"Serving on {args.bind}:{args.port}")
     try:
