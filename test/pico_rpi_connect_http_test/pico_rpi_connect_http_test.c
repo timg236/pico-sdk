@@ -6,7 +6,11 @@
 
 // Tests for the pico_rpi_connect_http client over lwIP with the
 // threadsafe-background async context: GET, POST, request and response
-// headers, HTTP and transport error handling, and a soak loop.
+// headers, HTTP and transport error handling, and a soak loop. The sections
+// run once over plain HTTP and again over HTTPS (HTTP_TEST_TRANSPORTS
+// selects the passes). The HTTPS pass is a stack reliability test rather
+// than a security test: the soak loop checks for heap leaks across
+// connections, and a stalled request is caught by the request timeout.
 //
 // Requires an access point and the HTTP test server from host/:
 //   host/wifi_ap_mode.sh start
@@ -14,6 +18,7 @@
 // The defaults below match those scripts; override with -DWIFI_SSID=...,
 // -DWIFI_PASSWORD=..., -DHTTP_TEST_SERVER=... at configure time.
 
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +28,7 @@
 #include "pico/test.h"
 
 #include "lwip/altcp_tls.h"
+#include "lwip/stats.h"
 #include "mbedtls/ssl.h"
 
 #include "http_client.h"
@@ -59,6 +65,12 @@ PICOTEST_MODULE_NAME("http", "pico_rpi_connect_http test");
 #ifndef HTTP_TEST_REQUEST_TIMEOUT_MS
 #define HTTP_TEST_REQUEST_TIMEOUT_MS 15000
 #endif
+// Transports to run the test sections over (bit mask).
+#define HTTP_TEST_TRANSPORT_PLAIN 1
+#define HTTP_TEST_TRANSPORT_TLS 2
+#ifndef HTTP_TEST_TRANSPORTS
+#define HTTP_TEST_TRANSPORTS (HTTP_TEST_TRANSPORT_PLAIN | HTTP_TEST_TRANSPORT_TLS)
+#endif
 
 #define HTTP_TEST_BODY_CAPACITY 2048
 #define HTTP_TEST_HDR_CAPACITY 1024
@@ -80,6 +92,23 @@ typedef struct {
     char hdr[HTTP_TEST_HDR_CAPACITY];
     char body[HTTP_TEST_BODY_CAPACITY];
 } http_test_req_t;
+
+typedef struct {
+    const char *name;
+    uint16_t port;
+    struct altcp_tls_config *tls; // NULL for plain HTTP
+} http_test_transport_t;
+
+// Transport used by http_test_get/http_test_post.
+static const http_test_transport_t *transport;
+
+// Heap usage: mbedtls allocates from the libc heap, altcp_tls state and TX
+// pbufs from the lwIP heap. Both are freed synchronously when a connection
+// closes, so usage should not grow across the soak loop.
+typedef struct {
+    size_t libc;
+    mem_size_t lwip;
+} http_test_heap_t;
 
 static err_t test_headers_fn(__unused httpc_state_t *connection, void *arg, struct pbuf *hdr,
                              u16_t hdr_len, u32_t content_len) {
@@ -184,11 +213,35 @@ static int http_test_request(http_test_req_t *req, const char *host, uint16_t po
 }
 
 static int http_test_get(http_test_req_t *req, const char *uri) {
-    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, NULL, 0, NULL, NULL);
+    return http_test_request(req, HTTP_TEST_SERVER, transport->port, uri, NULL, 0, NULL,
+                             transport->tls);
 }
 
 static int http_test_post(http_test_req_t *req, const char *uri, const char *data, uint16_t len) {
-    return http_test_request(req, HTTP_TEST_SERVER, HTTP_TEST_PORT, uri, data, len, NULL, NULL);
+    return http_test_request(req, HTTP_TEST_SERVER, transport->port, uri, data, len, NULL,
+                             transport->tls);
+}
+
+// Section name prefixed with the transport, e.g. "HTTPS GET".
+static const char *section(const char *name) {
+    static char buf[48];
+    snprintf(buf, sizeof(buf), "%s %s", transport->name, name);
+    return buf;
+}
+
+static void heap_snapshot(http_test_heap_t *heap) {
+    // Let the closing handshake of the last request finish so its TX
+    // segments are freed.
+    sleep_ms(100);
+    cyw43_arch_lwip_begin();
+    heap->libc = mallinfo().uordblks;
+    heap->lwip = lwip_stats.mem.used;
+    cyw43_arch_lwip_end();
+}
+
+static void heap_print(const char *when, const http_test_heap_t *heap) {
+    printf("%s heap: libc %u lwip %u/%u (max %u)\n", when, (unsigned)heap->libc,
+           (unsigned)heap->lwip, (unsigned)lwip_stats.mem.avail, (unsigned)lwip_stats.mem.max);
 }
 
 // Request bodies used by the POST and soak sections.
@@ -207,29 +260,16 @@ static int check_data_body(const http_test_req_t *req, uint32_t len) {
     return 0;
 }
 
-int main(void) {
-    stdio_init_all();
-
-    PICOTEST_START();
-
-    if (cyw43_arch_init()) {
-        printf("Failed to initialise cyw43\n");
-        return -1;
-    }
-    cyw43_arch_enable_sta_mode();
-
-    printf("Connecting to '%s'\n", WIFI_SSID);
-    int rc = 1;
-    for (int i = 0; i < 3 && rc != 0; i++) {
-        rc = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD,
-                                                CYW43_AUTH_WPA2_AES_PSK, 30000);
-    }
-    PICOTEST_CHECK_AND_ABORT(rc == 0, "Failed to connect to WiFi");
-    printf("Connected, server %s:%u\n", HTTP_TEST_SERVER, (unsigned)HTTP_TEST_PORT);
-
+// Run every section over one transport. A failing section returns early
+// with picotest_error_code set.
+static int run_transport_sections(const http_test_transport_t *t) {
     static http_test_req_t req;
+    int rc;
 
-    PICOTEST_START_SECTION("GET");
+    transport = t;
+    printf("Transport %s: server %s:%u\n", t->name, HTTP_TEST_SERVER, (unsigned)t->port);
+
+    PICOTEST_START_SECTION(section("GET"));
     rc = http_test_get(&req, "/get");
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /get did not complete");
     PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "GET /get transfer failed");
@@ -239,7 +279,7 @@ int main(void) {
     PICOTEST_CHECK(req.rx_len == req.body_len, "Result length does not match body");
     PICOTEST_END_SECTION();
 
-    PICOTEST_START_SECTION("Response headers");
+    PICOTEST_START_SECTION(section("Response headers"));
     rc = http_test_get(&req, "/get");
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /get did not complete");
     PICOTEST_CHECK(strstr(req.hdr, "X-Test-Server: pico-http-test") != NULL,
@@ -248,7 +288,7 @@ int main(void) {
                    "Content-Type header missing from response");
     PICOTEST_END_SECTION();
 
-    PICOTEST_START_SECTION("POST");
+    PICOTEST_START_SECTION(section("POST"));
     rc = http_test_post(&req, "/echo", post_body, sizeof(post_body) - 1);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "POST /echo did not complete");
     PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "POST /echo transfer failed");
@@ -256,9 +296,9 @@ int main(void) {
     PICOTEST_CHECK(strcmp(req.body, post_body) == 0, "POST /echo body was not echoed");
     PICOTEST_END_SECTION();
 
-    PICOTEST_START_SECTION("Request headers");
-    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_PORT, "/headers",
-                           NULL, 0, "X-Test-Id: 42\r\n", NULL);
+    PICOTEST_START_SECTION(section("Request headers"));
+    rc = http_test_request(&req, HTTP_TEST_SERVER, t->port, "/headers",
+                           NULL, 0, "X-Test-Id: 42\r\n", t->tls);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /headers did not complete");
     PICOTEST_CHECK(req.status == 200, "GET /headers status is not 200");
     PICOTEST_CHECK(strstr(req.body, "X-Test-Id: 42") != NULL,
@@ -267,7 +307,7 @@ int main(void) {
 
     // Transfers that carry an HTTP error complete with HTTPC_RESULT_OK; the
     // status code is reported to the result callback.
-    PICOTEST_START_SECTION("HTTP errors");
+    PICOTEST_START_SECTION(section("Error status"));
     rc = http_test_get(&req, "/status/404");
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /status/404 did not complete");
     PICOTEST_CHECK(req.status == 404, "GET /status/404 status is not 404");
@@ -292,7 +332,7 @@ int main(void) {
 
     // The server holds the connection open after responding, so completion
     // relies on parsing the lowercase content-length header.
-    PICOTEST_START_SECTION("Lowercase Content-Length");
+    PICOTEST_START_SECTION(section("Lowercase Content-Length"));
     rc = http_test_get(&req, "/lowercase");
     PICOTEST_CHECK_AND_ABORT(rc == 0, "GET /lowercase did not complete");
     PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "GET /lowercase transfer failed");
@@ -300,52 +340,36 @@ int main(void) {
                    "GET /lowercase body mismatch");
     PICOTEST_END_SECTION();
 
-    PICOTEST_START_SECTION("Transport errors");
+    PICOTEST_START_SECTION(section("Transport errors"));
     rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_CLOSED_PORT, "/get",
-                           NULL, 0, NULL, NULL);
+                           NULL, 0, NULL, t->tls);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "Closed-port request did not complete");
     PICOTEST_CHECK(req.result != HTTPC_RESULT_OK, "Closed-port request did not fail");
-    rc = http_test_request(&req, "no-such-host.invalid", HTTP_TEST_PORT, "/get",
-                           NULL, 0, NULL, NULL);
+    rc = http_test_request(&req, "no-such-host.invalid", t->port, "/get",
+                           NULL, 0, NULL, t->tls);
     PICOTEST_CHECK_AND_ABORT(rc == 0, "Bad-hostname request did not complete");
     PICOTEST_CHECK(req.result == HTTPC_RESULT_ERR_HOSTNAME, "Bad hostname did not fail DNS");
     PICOTEST_END_SECTION();
 
-    // HTTPS: the server certificate must chain to the built-in CA and carry
-    // the server's name.
-    struct altcp_tls_config *tls_config =
-        altcp_tls_create_config_client((const u8_t *)test_ca_cert, sizeof(test_ca_cert));
-    PICOTEST_CHECK_AND_ABORT(tls_config != NULL, "Failed to create TLS client config");
+    if (t->tls) {
+        // A server certificate not signed by the built-in CA must be rejected
+        // during the handshake.
+        PICOTEST_START_SECTION(section("Untrusted certificate"));
+        rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_UNTRUSTED_TLS_PORT, "/get",
+                               NULL, 0, NULL, t->tls);
+        PICOTEST_CHECK_AND_ABORT(rc == 0, "Untrusted-certificate request did not complete");
+        PICOTEST_CHECK(req.result != HTTPC_RESULT_OK, "Untrusted certificate was not rejected");
+        PICOTEST_CHECK(req.status != 200, "Untrusted certificate served a response");
+        PICOTEST_END_SECTION();
+    }
 
-    PICOTEST_START_SECTION("HTTPS GET");
-    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_TLS_PORT, "/get",
-                           NULL, 0, NULL, tls_config);
-    PICOTEST_CHECK_AND_ABORT(rc == 0, "HTTPS GET /get did not complete");
-    PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "HTTPS GET /get transfer failed");
-    PICOTEST_CHECK(req.status == 200, "HTTPS GET /get status is not 200");
-    PICOTEST_CHECK(strcmp(req.body, "pico-http-test-get\n") == 0, "HTTPS GET /get body mismatch");
-    PICOTEST_END_SECTION();
-
-    PICOTEST_START_SECTION("HTTPS POST");
-    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_TLS_PORT, "/echo",
-                           post_body, sizeof(post_body) - 1, NULL, tls_config);
-    PICOTEST_CHECK_AND_ABORT(rc == 0, "HTTPS POST /echo did not complete");
-    PICOTEST_CHECK(req.result == HTTPC_RESULT_OK, "HTTPS POST /echo transfer failed");
-    PICOTEST_CHECK(strcmp(req.body, post_body) == 0, "HTTPS POST /echo body was not echoed");
-    PICOTEST_END_SECTION();
-
-    // A server certificate not signed by the built-in CA must be rejected
-    // during the handshake.
-    PICOTEST_START_SECTION("HTTPS untrusted certificate");
-    rc = http_test_request(&req, HTTP_TEST_SERVER, HTTP_TEST_UNTRUSTED_TLS_PORT, "/get",
-                           NULL, 0, NULL, tls_config);
-    PICOTEST_CHECK_AND_ABORT(rc == 0, "Untrusted-certificate request did not complete");
-    PICOTEST_CHECK(req.result != HTTPC_RESULT_OK, "Untrusted certificate was not rejected");
-    PICOTEST_CHECK(req.status != 200, "Untrusted certificate served a response");
-    PICOTEST_END_SECTION();
-
-    PICOTEST_START_SECTION("Soak");
+    // Repeated connections: catches per-connection leaks (heap compared after
+    // the first iteration, which warms up caches such as DNS, and the last)
+    // and stalls (a request that never completes times out and fails).
+    PICOTEST_START_SECTION(section("Soak"));
+    http_test_heap_t heap_start, heap_end;
     int failures = 0;
+    absolute_time_t start = get_absolute_time();
     for (int i = 0; i < HTTP_TEST_SOAK_ITERATIONS; i++) {
         rc = http_test_get(&req, "/data/1024");
         if (rc != 0 || req.result != HTTPC_RESULT_OK || check_data_body(&req, 1024) != 0) {
@@ -357,12 +381,62 @@ int main(void) {
             printf("Soak: POST /echo failed at iteration %d\n", i);
             failures++;
         }
+        if (i == 0) {
+            heap_snapshot(&heap_start);
+            heap_print("Soak: start", &heap_start);
+        }
         if ((i + 1) % 10 == 0) {
             printf("Soak: %d/%d iterations\n", i + 1, HTTP_TEST_SOAK_ITERATIONS);
         }
     }
+    heap_snapshot(&heap_end);
+    heap_print("Soak: end", &heap_end);
+    printf("Soak: %u ms per iteration\n",
+           (unsigned)(absolute_time_diff_us(start, get_absolute_time()) / 1000 /
+                      HTTP_TEST_SOAK_ITERATIONS));
     PICOTEST_CHECK(failures == 0, "Soak test had failures");
+    PICOTEST_CHECK(heap_end.libc <= heap_start.libc, "Soak test leaked libc heap");
+    PICOTEST_CHECK(heap_end.lwip <= heap_start.lwip, "Soak test leaked lwIP heap");
     PICOTEST_END_SECTION();
+
+    return 0;
+}
+
+int main(void) {
+    stdio_init_all();
+
+    PICOTEST_START();
+
+    if (cyw43_arch_init()) {
+        printf("Failed to initialise cyw43\n");
+        return -1;
+    }
+    cyw43_arch_enable_sta_mode();
+
+    printf("Connecting to '%s'\n", WIFI_SSID);
+    int rc = 1;
+    for (int i = 0; i < 3 && rc != 0; i++) {
+        rc = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD,
+                                                CYW43_AUTH_WPA2_AES_PSK, 30000);
+    }
+    PICOTEST_CHECK_AND_ABORT(rc == 0, "Failed to connect to WiFi");
+    printf("Connected to '%s'\n", WIFI_SSID);
+
+#if HTTP_TEST_TRANSPORTS & HTTP_TEST_TRANSPORT_PLAIN
+    static const http_test_transport_t plain = { "HTTP", HTTP_TEST_PORT, NULL };
+    run_transport_sections(&plain);
+    PICOTEST_ABORT_IF_FAILED();
+#endif
+
+#if HTTP_TEST_TRANSPORTS & HTTP_TEST_TRANSPORT_TLS
+    // HTTPS: the server certificate must chain to the built-in CA and carry
+    // the server's name.
+    http_test_transport_t tls = { "HTTPS", HTTP_TEST_TLS_PORT, NULL };
+    tls.tls = altcp_tls_create_config_client((const u8_t *)test_ca_cert, sizeof(test_ca_cert));
+    PICOTEST_CHECK_AND_ABORT(tls.tls != NULL, "Failed to create TLS client config");
+    run_transport_sections(&tls);
+    PICOTEST_ABORT_IF_FAILED();
+#endif
 
     cyw43_arch_deinit();
 

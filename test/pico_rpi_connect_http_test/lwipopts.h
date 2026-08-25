@@ -27,7 +27,8 @@
 #define LWIP_NETIF_LINK_CALLBACK    1
 #define LWIP_NETIF_HOSTNAME         1
 #define LWIP_NETCONN                0
-#define MEM_STATS                   0
+/* Heap usage is compared across the soak loop to detect leaks. */
+#define MEM_STATS                   1
 #define SYS_STATS                   0
 #define MEMP_STATS                  0
 #define LINK_STATS                  0

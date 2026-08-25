@@ -11,12 +11,13 @@
 #
 # With no image argument the test is located in the build directory under
 # PICO_SDK_PATH. Environment: SERIAL (default /dev/ttyACM0), RUN_TIMEOUT
-# seconds (default 300, covers the soak test).
+# seconds (default 600, covers the soak loops; each TLS handshake takes
+# around 2.5 s).
 
 set -e
 
 SERIAL="${SERIAL:-/dev/ttyACM0}"
-RUN_TIMEOUT="${RUN_TIMEOUT:-300}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 HTTP_SERVER="${HTTP_SERVER:-10.42.0.1}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 LOG="pico_rpi_connect_http_test.log"
